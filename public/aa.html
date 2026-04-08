@@ -1,0 +1,731 @@
+<!doctype html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebGL Procedural Lava</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #040404;
+            font-family: Arial, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            filter: saturate(1.15) contrast(1.05);
+        }
+
+        .hud {
+            position: absolute;
+            top: 14px;
+            left: 14px;
+            z-index: 10;
+            color: #f5e9d7;
+            background: rgba(0, 0, 0, 0.55);
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.45;
+            pointer-events: none;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- <div class="hud">
+        Blue Energy Core<br>
+        Hold mouse for 3s to condense the ring and trigger burst
+    </div> -->
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script>
+        let isOn = false;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x020d18);
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0.0, 0.2, 4.6);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.18));
+
+        const dirLight = new THREE.DirectionalLight(0x7fd6ff, 2.2);
+        dirLight.position.set(2.5, 3.0, 4.5);
+        scene.add(dirLight);
+
+        const rimLight = new THREE.DirectionalLight(0x2d9cff, 0.8);
+        rimLight.position.set(-3.0, 1.5, -2.0);
+        scene.add(rimLight);
+
+        const geometry = new THREE.IcosahedronGeometry(1.0, 7);
+        const BURST_PARTICLE_COUNT = 220;
+        const CHARGE_PARTICLE_COUNT = 360;
+        const CHARGE_STREAM_COUNT = 280;
+
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0.0 },
+                uLightDir: { value: dirLight.position.clone().normalize() },
+                uModeBlend: { value: isOn ? 1.0 : 0.0 },
+                uBurstFlash: { value: 0.0 },
+                uChargeGlow: { value: 0.0 }
+            },
+            vertexShader: `
+        uniform float uTime;
+
+        varying vec3 vWorldPos;
+        varying vec3 vObjPos;
+        varying vec3 vNormalW;
+        varying float vDisp;
+
+        float hash31(vec3 p) {
+          return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+        }
+
+        float noise3(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+
+          float n000 = hash31(i + vec3(0.0, 0.0, 0.0));
+          float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+          float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+          float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+          float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+          float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+          float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+          float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+
+          float nx00 = mix(n000, n100, f.x);
+          float nx10 = mix(n010, n110, f.x);
+          float nx01 = mix(n001, n101, f.x);
+          float nx11 = mix(n011, n111, f.x);
+          float nxy0 = mix(nx00, nx10, f.y);
+          float nxy1 = mix(nx01, nx11, f.y);
+          return mix(nxy0, nxy1, f.z);
+        }
+
+        float fbm(vec3 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 5; i++) {
+            v += noise3(p) * a;
+            p = p * 2.02 + vec3(11.3, 7.1, 5.7);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec3 pos = position;
+
+          vec3 p = pos * 1.85;
+          vec3 flow = vec3(0.0, 0.0, uTime * 0.35);
+
+          float warpA = fbm(p + flow);
+          float warpB = fbm(p * 2.1 - flow * 1.35 + 9.7);
+          vec3 warped = p + vec3(warpA, warpB, warpA - warpB) * 0.55;
+
+          float dispNoise = fbm(warped * 1.4);
+          float ridge = abs(dispNoise * 2.0 - 1.0);
+          float displacement = mix(0.06, 0.34, 1.0 - ridge);
+
+          pos += normal * displacement;
+
+          vec4 world = modelMatrix * vec4(pos, 1.0);
+          vWorldPos = world.xyz;
+          vObjPos = pos;
+          vNormalW = normalize(normalMatrix * normal);
+          vDisp = displacement;
+
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        }
+      `,
+            fragmentShader: `
+        precision highp float;
+
+        uniform float uTime;
+        uniform vec3 uLightDir;
+        uniform float uModeBlend;
+        uniform float uBurstFlash;
+        uniform float uChargeGlow;
+
+        varying vec3 vWorldPos;
+        varying vec3 vObjPos;
+        varying vec3 vNormalW;
+        varying float vDisp;
+
+        float hash31(vec3 p) {
+          return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+        }
+
+        float noise3(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+
+          float n000 = hash31(i + vec3(0.0, 0.0, 0.0));
+          float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+          float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+          float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+          float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+          float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+          float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+          float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+
+          float nx00 = mix(n000, n100, f.x);
+          float nx10 = mix(n010, n110, f.x);
+          float nx01 = mix(n001, n101, f.x);
+          float nx11 = mix(n011, n111, f.x);
+          float nxy0 = mix(nx00, nx10, f.y);
+          float nxy1 = mix(nx01, nx11, f.y);
+          return mix(nxy0, nxy1, f.z);
+        }
+
+        float fbm(vec3 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 6; i++) {
+            v += noise3(p) * a;
+            p = p * 2.03 + vec3(17.2, 9.3, 13.1);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        float ridgeFbm(vec3 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 5; i++) {
+            float n = noise3(p);
+            n = 1.0 - abs(n * 2.0 - 1.0);
+            v += n * a;
+            p = p * 2.05 + vec3(3.7, 11.9, 1.2);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec3 N = normalize(vNormalW);
+          vec3 L = normalize(uLightDir);
+          vec3 V = normalize(cameraPosition - vWorldPos);
+
+          vec3 p = vObjPos * 2.6;
+          vec3 flow1 = vec3(0.0, 0.0, uTime * 0.55);
+          vec3 flow2 = vec3(uTime * -0.18, uTime * 0.12, uTime * 0.42);
+
+          float warp1 = fbm(p + flow1);
+          float warp2 = fbm(p * 1.9 - flow2 + 8.4);
+          vec3 domain = p + vec3(warp1 - 0.5, warp2 - 0.5, warp1 + warp2 - 1.0) * 1.15;
+
+          float crackField = ridgeFbm(domain * 1.25);
+          float lavaField = fbm(domain * 2.1 + flow1 * 0.7);
+          float fineField = fbm(domain * 4.5 - flow2 * 0.9);
+
+          float cracks = smoothstep(0.40, 0.82, crackField + lavaField * 0.38);
+          float hotCore = smoothstep(0.68, 0.96, lavaField * 0.85 + fineField * 0.45 + cracks * 0.18);
+          float molten = clamp(cracks * 0.78 + hotCore * 0.75, 0.0, 1.0);
+
+          vec3 rockDarkCool = vec3(0.01, 0.03, 0.05);
+          vec3 rockCool = vec3(0.03, 0.14, 0.22);
+          vec3 blueDeep = vec3(0.02, 0.30, 0.75);
+          vec3 blueBright = vec3(0.10, 0.82, 1.00);
+          vec3 blueWhite = vec3(0.72, 0.95, 1.00);
+
+          vec3 rockDarkWarm = vec3(0.02, 0.02, 0.02);
+          vec3 rockWarm = vec3(0.11, 0.03, 0.01);
+          vec3 lavaRed = vec3(0.58, 0.05, 0.00);
+          vec3 lavaOrange = vec3(1.00, 0.28, 0.02);
+          vec3 lavaYellow = vec3(1.00, 0.86, 0.20);
+
+          float shellMask = smoothstep(0.08, 0.42, cracks * 0.55 + vDisp * 1.2);
+
+          vec3 coolRock = mix(rockDarkCool, rockCool, shellMask);
+          vec3 blueColor = mix(blueDeep, blueBright, smoothstep(0.14, 0.70, molten));
+          blueColor = mix(blueColor, blueWhite, smoothstep(0.72, 0.97, hotCore));
+          vec3 blueBase = mix(coolRock, blueColor, cracks);
+
+          vec3 warmRock = mix(rockDarkWarm, rockWarm, shellMask);
+          vec3 lavaColor = mix(lavaRed, lavaOrange, smoothstep(0.18, 0.72, molten));
+          lavaColor = mix(lavaColor, lavaYellow, smoothstep(0.70, 0.95, hotCore));
+          vec3 lavaBase = mix(warmRock, lavaColor, cracks);
+
+          vec3 baseColor = mix(blueBase, lavaBase, uModeBlend);
+
+          float lambert = max(dot(N, L), 0.0);
+          float fresnel = pow(1.0 - max(dot(N, V), 0.0), 2.2);
+
+          vec3 blueEmissive = blueBright * cracks * (0.54 + uChargeGlow * 0.35);
+          blueEmissive += blueWhite * hotCore * (1.1 + uChargeGlow * 0.55);
+          blueEmissive += vec3(0.65, 0.95, 1.00) * pow(hotCore, 3.0) * 0.72;
+
+          vec3 lavaEmissive = lavaOrange * cracks * 0.45;
+          lavaEmissive += lavaYellow * hotCore * 0.9;
+          lavaEmissive += vec3(1.0, 0.45, 0.08) * pow(hotCore, 3.0) * 0.6;
+
+          vec3 emissive = mix(blueEmissive, lavaEmissive, uModeBlend);
+
+          vec3 lit = baseColor * (0.16 + lambert * 0.84);
+          vec3 fresnelBlue = vec3(0.08, 0.34, 0.55);
+          vec3 fresnelLava = vec3(0.18, 0.05, 0.01);
+          vec3 fresnelColor = mix(fresnelBlue, fresnelLava, uModeBlend);
+          vec3 finalColor = lit + emissive + fresnel * fresnelColor * (0.35 + cracks * 0.35);
+          finalColor += vec3(0.07, 0.20, 0.34) * uChargeGlow * (0.8 + hotCore * 0.6);
+          finalColor += mix(vec3(0.16, 0.34, 0.48), vec3(0.44, 0.16, 0.06), uModeBlend) * uBurstFlash;
+
+          gl_FragColor = vec4(finalColor, 1.0);
+        }
+      `
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+
+        function onIsOnChange(nextIsOn) {
+            console.log('isOn changed:', nextIsOn);
+        }
+
+        function setIsOn(nextIsOn) {
+            if (isOn === nextIsOn) return;
+            isOn = nextIsOn;
+            onIsOnChange(isOn);
+        }
+
+        const floor = new THREE.Mesh(
+            new THREE.CircleGeometry(6, 80),
+            new THREE.MeshStandardMaterial({ color: 0x0e0e0e, roughness: 1.0, metalness: 0.0 })
+        );
+        floor.rotation.x = -Math.PI * 0.5;
+        floor.position.y = -1.62;
+        scene.add(floor);
+
+        const burstPositions = new Float32Array(BURST_PARTICLE_COUNT * 3);
+        const burstSeeds = new Float32Array(BURST_PARTICLE_COUNT * 3);
+        const burstScales = new Float32Array(BURST_PARTICLE_COUNT);
+
+        for (let i = 0; i < BURST_PARTICLE_COUNT; i++) {
+            const i3 = i * 3;
+            const u = Math.random();
+            const v = Math.random();
+            const theta = Math.PI * 2 * u;
+            const phi = Math.acos(2 * v - 1);
+            const speed = 1.2 + Math.random() * 2.6;
+            const dir = new THREE.Vector3(
+                Math.sin(phi) * Math.cos(theta),
+                Math.cos(phi),
+                Math.sin(phi) * Math.sin(theta)
+            ).normalize().multiplyScalar(speed);
+
+            burstPositions[i3] = 0.0;
+            burstPositions[i3 + 1] = 0.0;
+            burstPositions[i3 + 2] = 0.0;
+            burstSeeds[i3] = dir.x;
+            burstSeeds[i3 + 1] = dir.y;
+            burstSeeds[i3 + 2] = dir.z;
+            burstScales[i] = 0.8 + Math.random() * 1.8;
+        }
+
+        const burstGeometry = new THREE.BufferGeometry();
+        burstGeometry.setAttribute('position', new THREE.BufferAttribute(burstPositions, 3));
+        burstGeometry.setAttribute('aVelocity', new THREE.BufferAttribute(burstSeeds, 3));
+        burstGeometry.setAttribute('aScale', new THREE.BufferAttribute(burstScales, 1));
+
+        const burstMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uProgress: { value: 0.0 },
+                uOpacity: { value: 0.0 }
+            },
+            vertexShader: `
+        uniform float uProgress;
+        attribute vec3 aVelocity;
+        attribute float aScale;
+        varying float vAlpha;
+
+        void main() {
+          float t = clamp(uProgress, 0.0, 1.0);
+          vec3 displaced = position + aVelocity * (t * 2.4) + vec3(0.0, -1.6 * t * t, 0.0);
+          vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
+          gl_Position = projectionMatrix * mvPosition;
+          gl_PointSize = (20.0 + 30.0 * aScale) * (1.0 - t) / max(-mvPosition.z, 0.001);
+          vAlpha = (1.0 - t) * (0.65 + 0.35 * sin(aScale * 12.0));
+        }
+      `,
+            fragmentShader: `
+        precision highp float;
+        uniform float uOpacity;
+        varying float vAlpha;
+
+        void main() {
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = dot(uv, uv);
+          float glow = smoothstep(0.25, 0.0, d);
+          vec3 color = mix(vec3(1.0, 0.25, 0.08), vec3(1.0, 0.85, 0.35), glow);
+          gl_FragColor = vec4(color, glow * vAlpha * uOpacity);
+        }
+      `,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+
+        const burstParticles = new THREE.Points(burstGeometry, burstMaterial);
+        burstParticles.visible = false;
+        scene.add(burstParticles);
+
+        const chargePositions = new Float32Array(CHARGE_PARTICLE_COUNT * 3);
+        const chargeAngles = new Float32Array(CHARGE_PARTICLE_COUNT);
+        const chargeOffsets = new Float32Array(CHARGE_PARTICLE_COUNT);
+        const chargeScales = new Float32Array(CHARGE_PARTICLE_COUNT);
+
+        for (let i = 0; i < CHARGE_PARTICLE_COUNT; i++) {
+            chargePositions[i * 3] = 0.0;
+            chargePositions[i * 3 + 1] = 0.0;
+            chargePositions[i * 3 + 2] = 0.0;
+            chargeAngles[i] = Math.random() * Math.PI * 2;
+            chargeOffsets[i] = Math.random();
+            chargeScales[i] = 0.5 + Math.random() * 1.4;
+        }
+
+        const chargeGeometry = new THREE.BufferGeometry();
+        chargeGeometry.setAttribute('position', new THREE.BufferAttribute(chargePositions, 3));
+        chargeGeometry.setAttribute('aAngle', new THREE.BufferAttribute(chargeAngles, 1));
+        chargeGeometry.setAttribute('aOffset', new THREE.BufferAttribute(chargeOffsets, 1));
+        chargeGeometry.setAttribute('aScale', new THREE.BufferAttribute(chargeScales, 1));
+
+        const chargeMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0.0 },
+                uHoldProgress: { value: 0.0 },
+                uOpacity: { value: 0.0 }
+            },
+            vertexShader: `
+        uniform float uTime;
+        uniform float uHoldProgress;
+        uniform float uOpacity;
+        attribute float aAngle;
+        attribute float aOffset;
+        attribute float aScale;
+        varying float vAlpha;
+
+        void main() {
+          float progress = clamp(uHoldProgress, 0.0, 1.0);
+          float swirl = uTime * (1.6 + progress * 4.2) + aOffset * 8.0;
+          float ringRadius = mix(2.45 + aOffset * 0.55, 1.1 + aOffset * 0.12, progress);
+          float localAngle = aAngle + swirl;
+          float vertical = sin(swirl * 2.4 + aAngle * 3.0) * (0.14 + (1.0 - progress) * 0.34);
+          vec3 displaced = vec3(
+            cos(localAngle) * ringRadius,
+            vertical,
+            sin(localAngle) * ringRadius
+          );
+          displaced *= mix(1.0, 0.72, progress);
+          vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
+          gl_Position = projectionMatrix * mvPosition;
+          gl_PointSize = (14.0 + 24.0 * aScale + progress * 18.0) / max(-mvPosition.z, 0.001);
+          vAlpha = uOpacity * (0.32 + progress * 0.95) * (0.5 + 0.5 * sin(aOffset * 31.4159 + uTime * 3.2));
+        }
+      `,
+            fragmentShader: `
+        precision highp float;
+        varying float vAlpha;
+
+        void main() {
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = dot(uv, uv);
+          float core = smoothstep(0.18, 0.0, d);
+          float halo = smoothstep(0.30, 0.0, d);
+          vec3 color = mix(vec3(0.08, 0.55, 1.0), vec3(0.92, 0.98, 1.0), core);
+          gl_FragColor = vec4(color, halo * vAlpha);
+        }
+      `,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+
+        const chargeParticles = new THREE.Points(chargeGeometry, chargeMaterial);
+        scene.add(chargeParticles);
+
+        const streamPositions = new Float32Array(CHARGE_STREAM_COUNT * 3);
+        const streamAngles = new Float32Array(CHARGE_STREAM_COUNT);
+        const streamOffsets = new Float32Array(CHARGE_STREAM_COUNT);
+        const streamRadius = new Float32Array(CHARGE_STREAM_COUNT);
+        const streamScale = new Float32Array(CHARGE_STREAM_COUNT);
+
+        for (let i = 0; i < CHARGE_STREAM_COUNT; i++) {
+            const i3 = i * 3;
+            streamPositions[i3] = 0.0;
+            streamPositions[i3 + 1] = 0.0;
+            streamPositions[i3 + 2] = 0.0;
+            streamAngles[i] = Math.random() * Math.PI * 2;
+            streamOffsets[i] = Math.random();
+            streamRadius[i] = 2.3 + Math.random() * 2.7;
+            streamScale[i] = 0.8 + Math.random() * 1.8;
+        }
+
+        const streamGeometry = new THREE.BufferGeometry();
+        streamGeometry.setAttribute('position', new THREE.BufferAttribute(streamPositions, 3));
+        streamGeometry.setAttribute('aAngle', new THREE.BufferAttribute(streamAngles, 1));
+        streamGeometry.setAttribute('aOffset', new THREE.BufferAttribute(streamOffsets, 1));
+        streamGeometry.setAttribute('aRadius', new THREE.BufferAttribute(streamRadius, 1));
+        streamGeometry.setAttribute('aScale', new THREE.BufferAttribute(streamScale, 1));
+
+        const streamMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0.0 },
+                uHoldProgress: { value: 0.0 },
+                uOpacity: { value: 0.0 }
+            },
+            vertexShader: `
+        uniform float uTime;
+        uniform float uHoldProgress;
+        uniform float uOpacity;
+        attribute float aAngle;
+        attribute float aOffset;
+        attribute float aRadius;
+        attribute float aScale;
+        varying float vAlpha;
+
+        void main() {
+          float progress = clamp(uHoldProgress, 0.0, 1.0);
+          float travel = fract(1.0 - aOffset - uTime * (0.25 + progress * 0.85));
+          float radius = mix(aRadius, 0.18, pow(progress, 1.4) * (1.0 - travel * 0.82));
+          float spiral = aAngle + uTime * (1.2 + progress * 4.8) + travel * 5.4;
+          float lift = sin(spiral * 2.0 + aOffset * 21.0) * (0.10 + (1.0 - progress) * 0.45) * (0.25 + travel);
+          vec3 displaced = vec3(cos(spiral), lift, sin(spiral)) * radius;
+          vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
+          gl_Position = projectionMatrix * mvPosition;
+          gl_PointSize = (16.0 + 42.0 * aScale * (0.45 + progress)) * (0.4 + travel) / max(-mvPosition.z, 0.001);
+          vAlpha = uOpacity * progress * (0.18 + 1.25 * pow(1.0 - travel, 2.0));
+        }
+      `,
+            fragmentShader: `
+        precision highp float;
+        varying float vAlpha;
+
+        void main() {
+          vec2 uv = gl_PointCoord - 0.5;
+          float d = dot(uv, uv);
+          float halo = smoothstep(0.26, 0.0, d);
+          float core = smoothstep(0.08, 0.0, d);
+          vec3 color = mix(vec3(0.06, 0.45, 1.0), vec3(0.95, 1.0, 1.0), core);
+          gl_FragColor = vec4(color, halo * vAlpha);
+        }
+      `,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+
+        const streamParticles = new THREE.Points(streamGeometry, streamMaterial);
+        scene.add(streamParticles);
+
+        const chargeRing = new THREE.Mesh(
+            new THREE.TorusGeometry(1.9, 0.045, 20, 160),
+            new THREE.MeshBasicMaterial({
+                color: 0x68c8ff,
+                transparent: true,
+                opacity: 0.0,
+                blending: THREE.AdditiveBlending
+            })
+        );
+        chargeRing.rotation.x = Math.PI * 0.5;
+        scene.add(chargeRing);
+
+        const chargeRingOuter = new THREE.Mesh(
+            new THREE.TorusGeometry(2.45, 0.028, 20, 180),
+            new THREE.MeshBasicMaterial({
+                color: 0xa8ecff,
+                transparent: true,
+                opacity: 0.0,
+                blending: THREE.AdditiveBlending
+            })
+        );
+        chargeRingOuter.rotation.x = Math.PI * 0.5;
+        scene.add(chargeRingOuter);
+
+        const chargeCore = new THREE.Mesh(
+            new THREE.SphereGeometry(0.34, 32, 32),
+            new THREE.MeshBasicMaterial({
+                color: 0xbff6ff,
+                transparent: true,
+                opacity: 0.0,
+                blending: THREE.AdditiveBlending
+            })
+        );
+        scene.add(chargeCore);
+
+        const clock = new THREE.Clock();
+        let pointerDown = false;
+        let holdStart = 0.0;
+        let holdProgress = 0.0;
+        let redHoldProgress = 0.0;
+        let burstTriggered = false;
+        let burstStartTime = -10.0;
+        let blurStrength = 0.0;
+        let afterimageStrength = 0.0;
+        let phase = isOn ? 'red' : 'blue';
+
+        function triggerBurst(t) {
+            phase = 'toRed';
+            burstTriggered = true;
+            burstStartTime = t;
+            burstParticles.position.copy(mesh.position);
+            burstParticles.visible = true;
+        }
+
+        window.addEventListener('pointerdown', () => {
+            if (burstTriggered || phase === 'toBlue') return;
+            pointerDown = true;
+            holdStart = clock.getElapsedTime();
+        });
+
+        function releaseHold() {
+            pointerDown = false;
+            holdStart = 0.0;
+        }
+
+        window.addEventListener('pointerup', releaseHold);
+        window.addEventListener('pointercancel', releaseHold);
+        window.addEventListener('pointerleave', releaseHold);
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+            material.uniforms.uTime.value = t;
+            material.uniforms.uLightDir.value.copy(dirLight.position).normalize();
+
+            const interactive = true;
+            const canChargeBlue = interactive && phase === 'blue' && pointerDown && !burstTriggered;
+            const canShakeRed = interactive && phase === 'red' && pointerDown;
+            const targetHoldProgress = canChargeBlue ? Math.min((t - holdStart) / 3.0, 1.0) : 0.0;
+            const targetRedHoldProgress = canShakeRed ? Math.min((t - holdStart) / 3.0, 1.0) : 0.0;
+            holdProgress = THREE.MathUtils.lerp(holdProgress, targetHoldProgress, pointerDown ? 0.12 : 0.1);
+            redHoldProgress = THREE.MathUtils.lerp(redHoldProgress, targetRedHoldProgress, pointerDown ? 0.18 : 0.12);
+
+            if (canChargeBlue && t - holdStart >= 3.0) {
+                triggerBurst(t);
+                releaseHold();
+            }
+
+            if (canShakeRed && t - holdStart >= 3.0) {
+                phase = 'toBlue';
+                burstStartTime = t;
+                releaseHold();
+            }
+
+            let transition = 0.0;
+            if (phase === 'blue') {
+                transition = 0.0;
+            } else if (phase === 'toRed') {
+                transition = Math.min((t - burstStartTime) / 1.8, 1.0);
+                if (transition >= 1.0) {
+                    phase = 'red';
+                    burstTriggered = false;
+                    setIsOn(true);
+                }
+            } else if (phase === 'red') {
+                transition = 1.0;
+            } else if (phase === 'toBlue') {
+                transition = Math.max(1.0 - (t - burstStartTime) / 1.15, 0.0);
+                if (transition <= 0.0) {
+                    phase = 'blue';
+                    setIsOn(false);
+                }
+            }
+
+            const burstElapsed = interactive ? Math.max(0.0, t - burstStartTime) : 0.0;
+            const burstProgress = phase === 'toRed' || burstTriggered ? Math.min(burstElapsed / 1.35, 1.0) : 0.0;
+            const burstFlash = phase === 'toRed' ? Math.max(0.0, 1.0 - burstElapsed * 2.3) : 0.0;
+            const shakeStrength = redHoldProgress * redHoldProgress * (phase === 'red' ? 1.0 : 0.0);
+            blurStrength = THREE.MathUtils.lerp(blurStrength, holdProgress * 8.4 + burstFlash * 4.0 + shakeStrength * 3.0, 0.12);
+            afterimageStrength = THREE.MathUtils.lerp(afterimageStrength, holdProgress * 0.86 + burstFlash * 0.35 + shakeStrength * 0.22, 0.1);
+
+            material.uniforms.uModeBlend.value = transition;
+            material.uniforms.uBurstFlash.value = burstFlash + shakeStrength * 0.2;
+            material.uniforms.uChargeGlow.value = holdProgress + shakeStrength * 0.1;
+
+            chargeMaterial.uniforms.uTime.value = t;
+            chargeMaterial.uniforms.uHoldProgress.value = holdProgress;
+            chargeMaterial.uniforms.uOpacity.value = holdProgress > 0.01 ? 1.0 : 0.0;
+            streamMaterial.uniforms.uTime.value = t;
+            streamMaterial.uniforms.uHoldProgress.value = holdProgress;
+            streamMaterial.uniforms.uOpacity.value = holdProgress > 0.01 ? 1.0 : 0.0;
+
+            chargeRing.visible = interactive && phase === 'blue' && !burstTriggered;
+            chargeRing.material.opacity = holdProgress * 0.95;
+            chargeRing.scale.setScalar(1.0 - holdProgress * 0.24);
+            chargeRing.rotation.z = t * (0.7 + holdProgress * 1.8);
+            chargeRingOuter.visible = interactive && phase === 'blue' && !burstTriggered;
+            chargeRingOuter.material.opacity = holdProgress * 0.7;
+            chargeRingOuter.scale.setScalar(1.05 + Math.sin(t * 4.2) * 0.03 - holdProgress * 0.38);
+            chargeRingOuter.rotation.z = -t * (0.5 + holdProgress * 2.5);
+            chargeCore.visible = interactive && phase === 'blue' && !burstTriggered;
+            chargeCore.material.opacity = holdProgress * (0.15 + holdProgress * 0.75);
+            chargeCore.scale.setScalar(0.75 + holdProgress * 0.9 + Math.sin(t * 9.0) * 0.03);
+
+            dirLight.intensity = 2.2 + holdProgress * 0.95;
+            rimLight.intensity = 0.8 + holdProgress * 0.8;
+            dirLight.color.setRGB(
+                THREE.MathUtils.lerp(0.48, 1.0, transition),
+                THREE.MathUtils.lerp(0.78 + holdProgress * 0.1, 1.0, transition),
+                1.0
+            );
+            rimLight.color.setRGB(
+                THREE.MathUtils.lerp(0.18, 1.0, transition),
+                THREE.MathUtils.lerp(0.62 + holdProgress * 0.18, 0.53, transition),
+                THREE.MathUtils.lerp(1.0, 0.27, transition)
+            );
+
+            scene.background.setRGB(
+                THREE.MathUtils.lerp(0.01, 0.04, transition),
+                THREE.MathUtils.lerp(0.05 + holdProgress * 0.05, 0.015, transition),
+                THREE.MathUtils.lerp(0.09 + holdProgress * 0.08, 0.015, transition)
+            );
+
+            burstMaterial.uniforms.uProgress.value = burstProgress;
+            burstMaterial.uniforms.uOpacity.value = phase === 'toRed' ? Math.max(0.0, 1.0 - burstProgress) : 0.0;
+            burstParticles.visible = phase === 'toRed' && burstProgress < 1.0;
+
+            const shakeOffsetX = shakeStrength * Math.sin(t * 42.0) * 0.09;
+            const shakeOffsetY = shakeStrength * Math.cos(t * 37.0) * 0.07;
+            const shakeRotZ = shakeStrength * Math.sin(t * 54.0) * 0.22;
+            mesh.rotation.y += 0.0048 + holdProgress * 0.006 + shakeStrength * 0.01;
+            mesh.rotation.x = Math.sin(t * 0.55) * 0.07 + shakeOffsetY;
+            mesh.rotation.z = shakeRotZ;
+            mesh.position.x = shakeOffsetX;
+            mesh.position.y = shakeOffsetY * 0.55;
+            mesh.scale.setScalar(1.0 + holdProgress * 0.05 + burstFlash * 0.04 + shakeStrength * 0.05);
+            renderer.domElement.style.filter = `saturate(${1.15 + holdProgress * 0.26 + burstFlash * 0.08}) contrast(${1.05 + holdProgress * 0.12}) brightness(${1.0 + holdProgress * 0.08}) blur(${blurStrength.toFixed(2)}px)`;
+            renderer.domElement.style.boxShadow = `0 0 ${16 + blurStrength * 8}px rgba(96, 192, 255, ${0.12 + holdProgress * 0.3})`;
+            renderer.domElement.style.opacity = `${1.0 - afterimageStrength * 0.07}`;
+
+            renderer.autoClearColor = false;
+            renderer.setClearColor(scene.background, 0.12 + (1.0 - afterimageStrength) * 0.18);
+            renderer.clear();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+
+</html>
