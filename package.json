@@ -10,10 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@types/underscore": "^1.13.0",
+    "@types/lodash": "^4.17.20",
+    "lodash": "^4.17.21",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "underscore": "^1.13.8"
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

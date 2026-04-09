@@ -1,41 +1,92 @@
-import { useMemo, useRef, useState } from "react";
-import _ from "underscore";
+import { useEffect, useMemo, useRef, useState } from "react";
+import _ from "lodash";
 
 export type Item = {
     groupId: string;
     floorId: string;
 };
 
-type Props = {
-    DefaultValues: Item[];
-    CheckedItems: string[];
-    OnCheckedItemsChange?: (
-        allCheckedItems: Item[],
-        changedItems: Item[],
-    ) => void;
-};
-
-type Checkable = {
+export type Checkable = {
     checked: boolean;
 };
 
-type CheckableItem = Item & Checkable;
+export type CheckableItem = Item & Checkable;
+
+type Props = {
+    rvLineList: Item[];
+    DefaultValues: CheckableItem[];
+    OnCheckedItemsChange?: (
+        allCheckedItems: CheckableItem[],
+        changedItems: CheckableItem[],
+    ) => void;
+};
 
 const itemKey = ({ groupId, floorId }: Item) => `${groupId}:${floorId}`;
 
+const normalizeCheckedItems = (
+    rvLineList: Item[],
+    defaultValues: CheckableItem[],
+): CheckableItem[] => {
+    const rvLineMap = new Map(rvLineList.map((item) => [itemKey(item), item]));
+
+    return defaultValues.reduce<CheckableItem[]>((memo, item) => {
+        if (!item.checked) {
+            return memo;
+        }
+
+        const matchedItem = rvLineMap.get(itemKey(item));
+        if (!matchedItem) {
+            return memo;
+        }
+
+        memo.push({ ...matchedItem, checked: true });
+        return memo;
+    }, []);
+};
+
 export const DualList = ({
+    rvLineList,
     DefaultValues,
-    CheckedItems,
     OnCheckedItemsChange,
 }: Props) => {
-    const [items, setItems] = useState<CheckableItem[]>(() =>
-        DefaultValues.map((item) => ({
-            ...item,
-            checked:
-                CheckedItems.includes(item.floorId) ||
-                CheckedItems.includes(itemKey(item)),
-        })),
+    const [checkedItems, setCheckedItems] = useState<CheckableItem[]>(() =>
+        normalizeCheckedItems(rvLineList, DefaultValues),
     );
+    const [groupKey, setGroupKey] = useState<string | null>(rvLineList[0]?.groupId ?? null);
+    const [isDragging, setIsDragging] = useState(false);
+    const draggedKeysRef = useRef<Set<string>>(new Set());
+    const dragCheckedStateRef = useRef<boolean | null>(null);
+
+    useEffect(() => {
+        setCheckedItems(normalizeCheckedItems(rvLineList, DefaultValues));
+    }, [rvLineList, DefaultValues]);
+
+    useEffect(() => {
+        if (rvLineList.length === 0) {
+            setGroupKey(null);
+            return;
+        }
+
+        const hasCurrentGroup = rvLineList.some((item) => item.groupId === groupKey);
+        if (!hasCurrentGroup) {
+            setGroupKey(rvLineList[0].groupId);
+        }
+    }, [groupKey, rvLineList]);
+
+    const checkedItemKeys = useMemo(
+        () => new Set(checkedItems.filter((item) => item.checked).map((item) => itemKey(item))),
+        [checkedItems],
+    );
+
+    const items = useMemo(
+        () =>
+            rvLineList.map((item) => ({
+                ...item,
+                checked: checkedItemKeys.has(itemKey(item)),
+            })),
+        [checkedItemKeys, rvLineList],
+    );
+
     const groupCounts = _.reduce(
         items,
         (memo, item) => {
@@ -52,64 +103,71 @@ export const DualList = ({
         },
         {} as Record<string, { total: number; checked: number }>,
     );
-    const [groupKey, setGroupKey] = useState(items[0]?.groupId ?? null);
-    const [isDragging, setIsDragging] = useState(false);
-    const draggedKeysRef = useRef<Set<string>>(new Set());
-    const dragCheckedStateRef = useRef<boolean | null>(null);
 
     const groupItems = useMemo(
-        () => _.where(items, { groupId: groupKey ?? "" }),
+        () => _.filter(items, (item: CheckableItem) => item.groupId === (groupKey ?? "")),
         [groupKey, items],
     );
-    const isAllGroupItemsChecked =
-        groupItems.length > 0 && groupItems.every((item) => item.checked);
 
-    const emitCheckedItemsChange = (nextItems: CheckableItem[], changedItems: Item[]) => {
+    const isAllGroupItemsChecked =
+        groupItems.length > 0 && groupItems.every((item: CheckableItem) => item.checked);
+
+    const emitCheckedItemsChange = (nextCheckedItems: CheckableItem[], changedItems: CheckableItem[]) => {
         if (changedItems.length === 0) {
             return;
         }
 
-        OnCheckedItemsChange?.(
-            nextItems
-                .filter((item) => item.checked)
-                .map(({ groupId, floorId }) => ({ groupId, floorId })),
-            changedItems,
-        );
+        OnCheckedItemsChange?.(nextCheckedItems, changedItems);
     };
 
     const setItemChecked = (targetKey: string, checked: boolean) => {
-        setItems((currentItems) => {
-            let changedItems: Item[] = [];
+        const targetItem = rvLineList.find((item) => itemKey(item) === targetKey);
+        if (!targetItem) {
+            return;
+        }
 
-            const nextItems = currentItems.map((item) => {
-                if (itemKey(item) !== targetKey || item.checked === checked) {
-                    return item;
-                }
+        setCheckedItems((currentCheckedItems) => {
+            const nextCheckedItems = checked
+                ? _.uniqBy(
+                    [...currentCheckedItems, { ...targetItem, checked: true }],
+                    (item) => itemKey(item),
+                )
+                : currentCheckedItems.filter((item) => itemKey(item) !== targetKey);
 
-                changedItems = [{ groupId: item.groupId, floorId: item.floorId }];
-                return { ...item, checked };
-            });
-
-            emitCheckedItemsChange(nextItems, changedItems);
-            return nextItems;
+            const changedItems = [{ ...targetItem, checked }];
+            emitCheckedItemsChange(nextCheckedItems, changedItems);
+            return nextCheckedItems;
         });
     };
 
     const setGroupItemsChecked = (targetGroupKey: string, checked: boolean) => {
-        setItems((currentItems) => {
-            const changedItems: Item[] = [];
+        const targetItems = rvLineList.filter((item) => item.groupId === targetGroupKey);
+        if (targetItems.length === 0) {
+            return;
+        }
 
-            const nextItems = currentItems.map((item) => {
-                if (item.groupId !== targetGroupKey || item.checked === checked) {
-                    return item;
-                }
+        setCheckedItems((currentCheckedItems) => {
+            const currentCheckedKeys = new Set(currentCheckedItems.map((item) => itemKey(item)));
+            const changedItems = targetItems
+                .filter((item) => currentCheckedKeys.has(itemKey(item)) !== checked)
+                .map((item) => ({ ...item, checked }));
 
-                changedItems.push({ groupId: item.groupId, floorId: item.floorId });
-                return { ...item, checked };
-            });
+            if (changedItems.length === 0) {
+                return currentCheckedItems;
+            }
 
-            emitCheckedItemsChange(nextItems, changedItems);
-            return nextItems;
+            const nextCheckedItems = checked
+                ? _.uniqBy(
+                    [
+                        ...currentCheckedItems,
+                        ...targetItems.map((item) => ({ ...item, checked: true })),
+                    ],
+                    (item) => itemKey(item),
+                )
+                : currentCheckedItems.filter((item) => item.groupId !== targetGroupKey);
+
+            emitCheckedItemsChange(nextCheckedItems, changedItems);
+            return nextCheckedItems;
         });
     };
 
@@ -187,7 +245,7 @@ export const DualList = ({
                     style={{ listStyle: "none", padding: 0, margin: 0, minWidth: 220 }}
                     onPointerLeave={endToggle}
                 >
-                    {groupItems.map((item) => {
+                    {groupItems.map((item: CheckableItem) => {
                         const targetKey = itemKey(item);
 
                         return (
