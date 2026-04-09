@@ -1,5 +1,6 @@
+import { useState } from "react";
 import "./App.css";
-import DualList, { type CheckableItem, type Item } from "./dualist";
+import DualList, { type Item } from "./dualist";
 
 function App() {
     const rvLineList: Item[] = [
@@ -14,21 +15,33 @@ function App() {
         { groupId: "채소", floorId: "양파" },
     ];
 
-    const defaultValues: CheckableItem[] = [
-        { groupId: "과일", floorId: "포도", checked: true },
-        { groupId: "채소", floorId: "토마토", checked: true },
-        { groupId: "과일", floorId: "바나나", checked: true },
+    const defaultValues: Item[] = [
+        { groupId: "과일", floorId: "포도" },
+        { groupId: "채소", floorId: "토마토" },
+        { groupId: "과일", floorId: "바나나" },
     ];
 
+    const [values, setValues] = useState(defaultValues);
+
     return (
-        <DualList
-            rvLineList={rvLineList}
-            DefaultValues={defaultValues}
-            OnCheckedItemsChange={(allCheckedItems, changedItems) => {
-                console.log("all checked items", allCheckedItems);
-                console.log("changed items", changedItems);
-            }}
-        />
+
+
+
+        <div>
+            <DualList
+                rvLineList={rvLineList}
+                DefaultValues={values}
+                OnCheckedItemsChange={(allCheckedItems, changedItems) => {
+                    console.log("all checked items", allCheckedItems);
+                    console.log("changed items", changedItems);
+                }}
+            />
+            <button onClick={(e) => {
+                setValues([
+                    { groupId: "과일", floorId: "포도" },
+                    { groupId: "채소", floorId: "토마토" }])
+            }}>선택한 아이템 변경</button>
+        </div>
     );
 }
 
